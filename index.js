@@ -1,116 +1,239 @@
-var slackAPI = require('slackbotapi');
-var Game = require('./game');
+const Game = require("./game");
+const Twilio = require("twilio");
 
-var CMD_PREFIX = '!w';
+const CMD_PREFIX = "/";
 
-var token = '' || process.env.SLACK_API_TOKEN;
+const client = new Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-var slack = new slackAPI({
-    'token': token,
-    'logging': true,
-    'autoReconnect': true
-});
+let games = {};
+let registry = {};
 
-var games = {};
-var registry = {};
+function sendPM({ to, body }) {
+  // todo support chat PM
+  client.messages.create({
+    from: to.proxy_address,
+    to: to.address,
+    body: "[private]: " + body,
+  });
+}
 
-slack.on('message', function (message) {
-  if (message.text.startsWith(CMD_PREFIX + ' ')) {
-    var channel = message.channel;
-    var parts = message.text.split(' ');
-    var command = parts[1];
-    var args = parts.slice(2);
+module.exports = function handler(message) {
+  console.log("handler: ", message);
 
-    if (command == 'start') {
-      if (!channel.startsWith('C') && !channel.startsWith('G')) {
-        slack.sendMsg(channel, "You can't do this through PM");
-        return;
+  if (message.text.startsWith(CMD_PREFIX)) {
+    const { user, text } = message;
+    let { channel } = message;
+    const parts = text.split(" ");
+    const command = parts[0];
+    const args = parts.slice(1);
+
+    if (command == "/start" || command == "/create") {
+      if (
+        games.hasOwnProperty(channel) &&
+        !(games[channel].currentTurn == "End" || games[channel].currentTurn == "Beginning")
+      ) {
+        sendPM({
+          to: user,
+          body: "A game is already in progress...",
+        });
+        return false;
       }
-      if (games.hasOwnProperty(channel) && games[channel].currentTurn != 'End') {
-        slack.sendMsg(channel, "A game is already in progress...");
-        return;
-      }
-      games[channel] = new Game(slack, channel, args);
-      registry[games[channel].gameID] = channel;
-    }
-
-    else if (command.startsWith('peek')) {
-      if (!channel.startsWith('D')) {
-        slack.sendMsg(channel, "You just can't peek at cards blatantly");
-        return;
-      }
-      var gameID = command.split('-')[1];
-      if (!registry.hasOwnProperty(gameID)) {
-        slack.sendMsg(channel, "Can't find a game to do this action...");
-        return;
-      }
-      channel = registry[gameID];
-      clearTimeout(games[channel].timeLimit);
-      games[channel].seerPeek(message.user, args[0]);
-    }
-
-    else if (command.startsWith('rob')) {
-      if (!channel.startsWith('D')) {
-        slack.sendMsg(channel, "Please don't cause trouble");
-        return;
-      }
-      var gameID = command.split('-')[1];
-      if (!registry.hasOwnProperty(gameID)) {
-        slack.sendMsg(channel, "Can't find a game to do this action...");
-        return;
-      }
-      channel = registry[gameID];
-      clearTimeout(games[channel].timeLimit);
-      games[channel].robberRob(message.user, args[0]);
-    }
-
-    else if (command.startsWith('swap')) {
-      if (!channel.startsWith('D')) {
-        slack.sendMsg(channel, "Please don't cause trouble");
-        return;
-      }
-      var gameID = command.split('-')[1];
-      if (!registry.hasOwnProperty(gameID)) {
-        slack.sendMsg(channel, "Can't find a game to do this action...");
-        return;
-      }
-      channel = registry[gameID];
-      clearTimeout(games[channel].timeLimit);
-      games[channel].troublemakerSwap(message.user, args[0], args[1]);
-    }
-
-    else if (command == 'vote') {
-      if (!channel.startsWith('C') && !channel.startsWith('G')) {
-        slack.sendMsg(channel, "You can't do this through PM");
-        return;
-      }
-      games[channel].lynchingVote(message.user, args[0]);
-    }
-
-    else if (command == 'force-end') {
-      if (!channel.startsWith('C') && !channel.startsWith('G')) {
-        slack.sendMsg(channel, "You can't do this through PM");
-        return;
+      let identities = {};
+      if (games.hasOwnProperty(channel) && games[channel].currentTurn == "End") {
+        // save the identities in case of game restart
+        identities = games[channel].identities;
+        delete games[channel];
       }
       if (!games.hasOwnProperty(channel)) {
-        slack.sendMsg(channel, "Can't find a game to end...");
+        // create a new game and add any users as arguments
+        games[channel] = new Game(client, channel);
+        registry[games[channel].gameID] = channel;
+        games[channel].identities = identities;
+      }
+      // console.log("GAME:", games[channel]);
+      if (command == "/start") {
+        games[channel].start(args);
+      }
+    } else if (command == "/name") {
+      if (!games.hasOwnProperty(channel)) {
+        sendPM({
+          to: user,
+          body: "Can't find a game to set your name try /create first",
+        });
+        return false;
+      }
+      const id = args.join("_");
+      if (Object.values(games[channel].identities).find((u) => u.identity === id)) {
+        sendPM({
+          to: user,
+          body: "Someone already has the name: " + id,
+        });
+        return false;
+      }
+      games[channel]
+        .addPlayers()
+        .then((p) => {
+          games[channel].identities[user.sid].identity = id;
+          client.conversations
+            .conversations(channel)
+            .messages.create({ author: "bot", body: user.address + " is now known as: " + id });
+        })
+        .catch((err) => console.error(err));
+    } else if (command == "/invite") {
+      if (!games.hasOwnProperty(channel)) {
+        sendPM({
+          to: user,
+          body: "Can't find a game to invite to. Try /create first",
+        });
+        return false;
+      }
+      if (games[channel].currentTurn !== "Beginning") {
+        sendPM({
+          to: user,
+          body: "Game has already started...",
+        });
+        return false;
+      }
+      for (let inv of args) {
+        sendPM({
+          to: { address: inv, proxy_address: process.env.SMS_NUMBER },
+          body:
+            "You're invited to a game of *Ultimate Werewolf*. To join send `/join " +
+            games[channel].gameID +
+            " [username]`",
+        });
+      }
+    } else if (command == "/join") {
+      const gameID = args[0];
+      if (!registry.hasOwnProperty(gameID)) {
+        sendPM({
+          to: user,
+          body: "Can't find a game with that ID...",
+        });
+        return false;
+      } else if (games[registry[gameID]].currentTurn !== "Beginning") {
+        sendPM({
+          to: user,
+          body: "Game has already started...",
+        });
+        return false;
+      } else {
+        const join_channel = registry[gameID];
+        // todo chat users
+        client.conversations
+          .conversations(channel)
+          .remove()
+          .then((c) => {
+            client.conversations
+              .conversations(join_channel)
+              .participants.create({
+                "messagingBinding.address": user.address,
+                "messagingBinding.proxyAddress": user.proxy_address,
+              })
+              .then((p) => {
+                const name = args.slice(1).join("_");
+                const id = { identity: name ? name : p.identity ? p.identity : p.messagingBinding.address };
+                // add player to game
+                games[registry[gameID]].players.push(p.sid);
+                games[registry[gameID]].identities[p.sid] = {
+                  ...(p.messagingBinding && { ...p.messagingBinding }),
+                  ...id,
+                  sid: p.sid,
+                };
+                client.conversations
+                  .conversations(join_channel)
+                  .messages.create({ author: "bot", body: "A new player: <" + id.identity + "> has joined the game!" });
+              })
+              .catch((err) => {
+                console.error(err);
+              });
+          })
+          .catch((err) => {
+            console.error(err);
+          });
+      }
+    } else if (command.startsWith("/quit")) {
+      client.conversations
+        .conversations(channel)
+        .participants(user.sid)
+        .remove()
+        .then((c) => {
+          const id = games[channel].identities[user.sid].identity;
+          client.conversations
+            .conversations(channel)
+            .messages.create({ author: "bot", body: id + " has left the game" });
+        })
+        .catch((err) => {
+          console.error(err);
+        });
+    } else if (command.startsWith("/peek")) {
+      if (!games.hasOwnProperty(channel)) {
+        sendPM({
+          to: user,
+          body: "Can't find a game to do this action...",
+        });
+        return;
+      }
+      clearTimeout(games[channel].timeLimit);
+      games[channel].seerPeek(user.sid, args[0]);
+    } else if (command.startsWith("/rob")) {
+      if (!games.hasOwnProperty(channel)) {
+        sendPM({
+          to: user,
+          body: "Can't find a game to do this action...",
+        });
+        return;
+      }
+      clearTimeout(games[channel].timeLimit);
+      games[channel].robberRob(user.sid, args[0]);
+    } else if (command.startsWith("/swap")) {
+      if (!games.hasOwnProperty(channel)) {
+        sendPM({
+          to: user,
+          body: "Can't find a game to do this action...",
+        });
+        return;
+      }
+      clearTimeout(games[channel].timeLimit);
+      games[channel].troublemakerSwap(user.sid, args[0], args[1]);
+    } else if (command == "/vote") {
+      games[channel].lynchingVote(user.sid, args[0]);
+    } else if (command == "/force-end") {
+      if (!games.hasOwnProperty(channel)) {
+        sendPM({
+          to: user,
+          body: "Can't find a game to end...",
+        });
         return;
       }
       games[channel].forceEnd();
       delete games[channel];
+    } else if (command == "/help") {
+      sendHelpMessage(user);
+    } else {
+      // unhandled command
+      sendHelpMessage(user);
     }
+    // all commands are private
+    return false;
+  } // general chit-chat allowed
+  return true;
+};
 
-    else if (command == 'help') {
-      var helpMessage = ""
-        + "• Anyone can chat `!w start` in a channel to start a new game. There can only be one game in-progress per channel.\n"
-        + "• You can also specify players by chatting `!w start @user1 @user2 ...`, up to 8 players in total\n"
-        + "• A Seer can PM the <@" + slack.slackData.self.id + "> `!w peek-gameid center` to peek at 2 random center cards or `!w peek @user` to peek at a player's card\n"
-        + "• A Robber can PM the <@" + slack.slackData.self.id + "> `!w rob-gameid @user` to rob a user\n"
-        + "• A Troublemaker can PM the <@" + slack.slackData.self.id + "> `!w swap-gameid @user1 @user2` to swap @user1 and @user2's cards\n"
-        + "• Anyone can chat `!w vote @user` to vote who will be lynched\n"
-        + "• Anyone can chat `!w force-end` to end a game prematurely\n"
-        + "• Typing `!w help` will show this help message";
-       slack.sendMsg(channel, helpMessage);
-    }
-  }
-});
+function sendHelpMessage(user) {
+  var helpMessage =
+    "" +
+    "• Anyone can chat `/start` in a conversation to start a new game. There can only be one game in-progress per conversation.\n" +
+    "• You can also specify players by chatting `/start user1 user2 ...`, up to 8 players in total\n" +
+    "• From an initial conversation you can `/join gameid` or `/create user1 user2 ...` to launch a new game\n" +
+    "• Prior to a game starting you can invite/SMS people with `/invite address`. They will receive instructions on how to join\n" +
+    "• SMS based users may wish to set their name with `/name [username]`\n" +
+    "• A Seer can message `/peek center` to peek at 2 random (non-player) roles or `/peek user` to peek at a player's role\n" +
+    "• A Robber can message `/rob user` to steal another player's role\n" +
+    "• A Troublemaker can message `/swap user1 user2` to swap the roles of user1 and user2\n" +
+    "• Anyone can chat `/vote user` to vote who will be lynched\n" +
+    "• Anyone can chat `/force-end` to end a game prematurely\n" +
+    "• Leave the game (and chat) with `/quit` at any time\n" +
+    "• Typing `/help` will show this help message";
+  sendPM({ to: user, body: helpMessage });
+}
