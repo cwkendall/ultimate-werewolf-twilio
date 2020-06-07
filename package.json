@@ -8,6 +8,12 @@
     "twilio",
     "bot"
   ],
+  "author": "Chris Kendall <ckendall@twilio.com>",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cwkendall/ultimate-werewolf-twilio.git"
+  },
   "private": true,
   "homepage": "https://github.com/cwkendall/ultimate-werewolf-twilio",
   "bugs": {
@@ -16,14 +22,12 @@
   },
   "main": "app.js",
   "scripts": {
-    "start": "./node_modules/.bin/nodemon app.js",
-    "test": "echo \"Warning: no test specified\""
+    "start": "node app.js",
+    "test": "echo \"Warning: no test specified\"",
+    "dev": "./node_modules/.bin/nodemon app.js"
   },
-  "author": "Chris Kendall <ckendall@twilio.com>",
-  "license": "ISC",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/cwkendall/ultimate-werewolf-twilio.git"
+    "engines": {
+    "node": "14.x"
   },
   "dependencies": {
     "dotenv-safe": "^8.2.0",
