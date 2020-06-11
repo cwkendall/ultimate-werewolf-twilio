@@ -1,5 +1,6 @@
 const Game = require("./game");
 const Twilio = require("twilio");
+const QRCode = require("qrcode");
 
 const CMD_PREFIX = "/";
 
@@ -8,12 +9,13 @@ const client = new Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUT
 let games = {};
 let registry = {};
 
-function sendPM({ to, body }) {
+function sendPM({ to, body, media }) {
   // todo support chat PM
   client.messages.create({
     from: to.proxy_address,
     to: to.address,
     body: "[private]: " + body,
+    ...(media && { mediaUrl: media }),
   });
 }
 
@@ -79,6 +81,35 @@ module.exports = function handler(message) {
             .messages.create({ author: "bot", body: user.address + " is now known as: " + id });
         })
         .catch((err) => console.error(err));
+    } else if (command == "/qrcode") {
+      if (!games.hasOwnProperty(channel)) {
+        sendPM({
+          to: user,
+          body: "Can't find a game to invite to. Try /create first",
+        });
+        return false;
+      }
+      if (games[channel].currentTurn !== "Beginning") {
+        sendPM({
+          to: user,
+          body: "Game has already started...",
+        });
+        return false;
+      }
+      QRCode.toFile(
+        "public/invites/qr-"+channel+".png",
+        "SMSTO:"+user.proxy_address+":/join " + games[channel].gameID,
+        {
+        },
+        function (err) {
+          if (err) throw err;
+          sendPM({
+            to: user,
+            body: "this QR can be used to join game: " + games[channel].gameID,
+            media: process.env.PUBLIC_BASE_URL + "/invites/qr-"+channel+".png",
+          });
+        }
+      );
     } else if (command == "/invite") {
       if (!games.hasOwnProperty(channel)) {
         sendPM({
@@ -133,13 +164,18 @@ module.exports = function handler(message) {
               .then((p) => {
                 const name = args.slice(1).join("_");
                 const id = { identity: name ? name : p.identity ? p.identity : p.messagingBinding.address };
-                // add player to game
-                games[registry[gameID]].players.push(p.sid);
-                games[registry[gameID]].identities[p.sid] = {
+                const user = {
                   ...(p.messagingBinding && { ...p.messagingBinding }),
                   ...id,
                   sid: p.sid,
-                };
+                }
+                // add player to game
+                games[registry[gameID]].players.push(p.sid);
+                games[registry[gameID]].identities[p.sid] = user;
+                sendPM({
+                  to: user,
+                  body: "Hint: reply with `/name username` the set a nickname",
+                });
                 client.conversations
                   .conversations(join_channel)
                   .messages.create({ author: "bot", body: "A new player: <" + id.identity + "> has joined the game!" });
